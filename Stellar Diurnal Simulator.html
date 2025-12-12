@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>별의 일주운동 시뮬레이터 (내부 관측자 시점)</title>
+  <style>
+    body{margin:0;background:#fff;color:#000;font-family:"맑은 고딕",Arial,sans-serif;text-align:center}
+    h1{margin:16px 0 6px;font-size:22px}
+    p{margin:0 0 12px;font-size:13px}
+    canvas{background:#fff;border:1px solid #999}
+    .row{display:flex;justify-content:center;align-items:flex-start;gap:34px;margin:10px 0 18px;flex-wrap:wrap}
+    .controls{margin:6px 0 10px;font-size:14px}
+    .camWrap{font-size:14px;display:none;min-width:320px}
+  </style>
+</head>
+<body>
+  <!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>별의 일주운동 시뮬레이터 (내부 관측자 시점)</title>
+  <style>
+    body{margin:0;background:#fff;color:#000;font-family:"맑은 고딕",Arial,sans-serif;text-align:center}
+    h1{margin:16px 0 6px;font-size:22px}
+    p{margin:0 0 12px;font-size:13px}
+    canvas{background:#fff;border:1px solid #999}
+    .row{display:flex;justify-content:center;align-items:flex-start;gap:34px;margin:10px 0 18px;flex-wrap:wrap}
+    .controls{margin:6px 0 10px;font-size:14px}
+    .camWrap{font-size:14px;display:none;min-width:320px}
+  </style>
+</head>
+<body>
+  <h1>별의 일주운동 시뮬레이터 (내부 관측자 시점)</h1>
+  <p>관측자가 지구 표면에서 천구 <b>안쪽</b>을 바라볼 때 별의 일주운동이 어떻게 보이는지 나타낸 모델입니다.</p>
+
+  <div class="controls">
+    <label><input type="checkbox" id="toggleHorizon"> 지평면 표시</label>
+  </div>
+
+  <div class="controls">
+    <label style="margin-right:16px;"><input type="radio" name="observer" value="north" checked> 북극 관측자</label>
+    <label style="margin-right:16px;"><input type="radio" name="observer" value="mid"> 중위도(45°)</label>
+    <label><input type="radio" name="observer" value="equator"> 적도 관측자</label>
+  </div>
+
+  <div class="row">
+    <canvas id="sim" width="700" height="700"></canvas>
+
+    <div class="camWrap" id="camWrapper">
+      <label>관측 방향 선택:
+        <select id="viewDir">
+          <option value="east">동쪽</option>
+          <option value="west">서쪽</option>
+          <option value="south">남쪽</option>
+          <option value="north">북쪽</option>
+        </select>
+      </label>
+      <br />
+      <canvas id="simCam" width="300" height="300" style="margin-top:8px;"></canvas>
+    </div>
+  </div>
+
+<script>
+'use strict';
+
+/* ===================== DOM ===================== */
+const canvas     = document.getElementById('sim');
+const ctx        = canvas.getContext('2d');
+const camCanvas  = document.getElementById('simCam');
+const camCtx     = camCanvas.getContext('2d');
+const camWrapper = document.getElementById('camWrapper');
+const toggleH    = document.getElementById('toggleHorizon');
+const viewDirSel = document.getElementById('viewDir');
+
+/* ===================== 상수 ===================== */
+const W = canvas.width;
+const H = canvas.height;
+const cx = W / 2;
+const cy = H / 2;
+
+const R_SPHERE = 260;
+const R_EARTH  = 80;
+const DEG2RAD  = Math.PI / 180;
+
+/* ===================== 상태 ===================== */
+let currentObserver = 'north';
+let obsLatRad       = 90 * DEG2RAD;
+let skyAzOffset     = 0;             // 하늘(방위) 기준 회전 오프셋
+let showHorizon     = false;
+
+let camAzCenter     = 90 * DEG2RAD;  // 카메라(중위도 전용): 기본 동쪽
+
+/* ===================== 별(적위선에 배치) ===================== */
+const latitudeDegs  = [-60, -30, 0, 30, 60];
+const latitudeBands = latitudeDegs.map(d => ({ deg: d, rad: d * DEG2RAD }));
+const stars = [];
+
+let globalAngle = 0;
+const SPEED = 0.003;
+
+function setObserver() {
+  if (currentObserver === 'north') {
+    obsLatRad   = 90 * DEG2RAD;
+    skyAzOffset = 0;
+  } else if (currentObserver === 'mid') {
+    obsLatRad   = 45 * DEG2RAD;
+    // 내부 시점 기준(수업용 시각화): 기준선을 약간 왼쪽으로 돌려 보이게
+    skyAzOffset = -45 * DEG2RAD;
+  } else {
+    obsLatRad   = 0;
+    skyAzOffset = -90 * DEG2RAD;
+  }
+}
+
+function initStars() {
+  const baseCount = 70;
+  stars.length = 0;
+
+  latitudeBands.forEach((band, i) => {
+    const count = baseCount - i * 10;
+    for (let k = 0; k < count; k++) {
+      stars.push({
+        dec:   band.rad,
+        H0:    (2 * Math.PI * k) / count,
+        size:  (band.deg === 0 ? 3 : 2),
+        color: 'rgba(255,255,220,0.9)'
+      });
+    }
+  });
+}
+
+/* ===================== 천구 변환 ===================== */
+// 적위(dec), 시어각(H), 위도(phi) → 고도(h), 방위각(A)
+function altAzFromDecH(dec, Hh, phi) {
+  const sinPhi = Math.sin(phi);
+  const cosPhi = Math.cos(phi);
+  const sinDec = Math.sin(dec);
+  const cosDec = Math.cos(dec);
+  const sinH   = Math.sin(Hh);
+  const cosH   = Math.cos(Hh);
+
+  const sinHgt = sinPhi * sinDec + cosPhi * cosDec * cosH;
+  const h      = Math.asin(sinHgt);
+
+  const cosHgt = Math.cos(h);
+  if (cosHgt < 1e-9) return { h, A: 0 };
+
+  const sinA = (-cosDec * sinH) / cosHgt;
+  const cosA = (cosPhi * sinDec - sinPhi * cosDec * cosH) / cosHgt;
+  const A    = Math.atan2(sinA, cosA);
+  return { h, A };
+}
+
+// 내부 관측자 기준 화면 좌표
+function projectAltAzToScreen(h, A0) {
+  const A = A0 + skyAzOffset;
+  const cosHgt = Math.cos(h);
+  const sinHgt = Math.sin(h);
+
+  const x = R_SPHERE * cosHgt * Math.sin(A);
+  const y = R_SPHERE * sinHgt;
+  const z = R_SPHERE * cosHgt * Math.cos(A);
+
+  return { x: cx + x, y: cy - y, behind: (z <= 0) };
+}
+
+/* ===================== 메인 렌더 ===================== */
+function drawBackground() {
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawSkyDome() {
+  // 천구 외곽
+  ctx.save();
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth   = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R_SPHERE, 0, 2 * Math.PI);
+  ctx.stroke();
+
+  // 천구 내부(검정 하늘)
+  const g = ctx.createRadialGradient(cx, cy - R_SPHERE * 0.55, R_SPHERE * 0.12, cx, cy, R_SPHERE);
+  g.addColorStop(0, 'rgba(60,60,110,0.22)');
+  g.addColorStop(1, 'rgba(0,0,0,0.96)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R_SPHERE, 0, 2 * Math.PI);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawDecCircles() {
+  ctx.save();
+  for (const band of latitudeBands) {
+    const dec = band.rad;
+    ctx.lineWidth   = (band.deg === 0 ? 1.6 : 1.0);
+    ctx.strokeStyle = (band.deg === 0 ? '#88aaff' : '#555a88');
+    if (band.deg !== 0) ctx.setLineDash([4, 4]);
+
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i <= 360; i++) {
+      const Hh = (2 * Math.PI * i) / 360;
+      const { h, A } = altAzFromDecH(dec, Hh, obsLatRad);
+      const p = projectAltAzToScreen(h, A);
+      if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+      else          { ctx.lineTo(p.x, p.y); }
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
+function drawHorizonPlane() {
+  if (!showHorizon) return;
+  ctx.save();
+  // 북극 관측자: 지평면이 천구의 적도와 일치(원 중심을 가르는 타원)
+  ctx.fillStyle = 'rgba(240,220,150,0.55)';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, R_SPHERE, R_SPHERE * 0.32, 0, 0, 2 * Math.PI);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawEarth() {
+  ctx.save();
+  // 지구 그라디언트
+  const g = ctx.createRadialGradient(cx - R_EARTH * 0.35, cy - R_EARTH * 0.35, R_EARTH * 0.12, cx, cy, R_EARTH);
+  g.addColorStop(0, '#4cc3ff');
+  g.addColorStop(1, '#003a66');
+
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R_EARTH, 0, 2 * Math.PI);
+  ctx.fill();
+
+  ctx.strokeStyle = '#dff7ff';
+  ctx.lineWidth   = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R_EARTH, 0, 2 * Math.PI);
+  ctx.stroke();
+
+  // 자전축(빨강) + 지평선(초록)
+  const rot  = skyAzOffset;
+  const sinR = Math.sin(rot);
+  const cosR = Math.cos(rot);
+  const rotXY = (x, y) => ({ x: x * cosR - y * sinR, y: x * sinR + y * cosR });
+
+  // 자전축
+  const top = rotXY(0, -R_EARTH * 1.25);
+  const bot = rotXY(0,  R_EARTH * 1.25);
+  ctx.strokeStyle = '#ff6666';
+  ctx.lineWidth   = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx + top.x, cy + top.y);
+  ctx.lineTo(cx + bot.x, cy + bot.y);
+  ctx.stroke();
+
+  // 지평선
+  const L  = rotXY(-R_EARTH * 1.15, 0);
+  const Rr = rotXY( R_EARTH * 1.15, 0);
+  ctx.strokeStyle = '#66ffcc';
+  ctx.lineWidth   = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(cx + L.x,  cy + L.y);
+  ctx.lineTo(cx + Rr.x, cy + Rr.y);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawObserver() {
+  // 간단 스틱맨(항상 '천정' 방향으로 선 것처럼)
+  ctx.save();
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth   = 3;
+
+  const hx  = cx;
+  const hy  = cy - R_EARTH * 1.3;
+  const top = cy - R_EARTH * 1.2;
+  const bot = cy - R_EARTH * 1.05;
+
+  ctx.beginPath();
+  ctx.arc(hx, hy, 7, 0, 2 * Math.PI);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(hx, top);
+  ctx.lineTo(hx, bot);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+// 지평면 표시 시 라벨
+function drawHorizonLabels() {
+  ctx.save();
+  ctx.fillStyle = '#000';
+  ctx.font = '13px 맑은 고딕';
+  ctx.textAlign = 'center';
+
+  if (currentObserver === 'north') {
+    ctx.fillText('천구의 북극-천정', cx, cy - R_SPHERE - 18);
+    ctx.fillText('천구의 남극-천저', cx, cy + R_SPHERE + 24);
+    ctx.fillText('남', cx - R_SPHERE - 18, cy);
+    ctx.fillText('남', cx + R_SPHERE + 18, cy);
+  }
+  else if (currentObserver === 'mid') {
+    // 천정 / 천저
+    ctx.fillText('천정', cx, cy - R_SPHERE - 18);
+    ctx.fillText('천저', cx, cy + R_SPHERE + 24);
+
+    // 천구의 북극 (자전축 연장 방향)
+    {
+      const angle = -135 * DEG2RAD;
+      const r = R_SPHERE + 26;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(-45 * DEG2RAD);
+      ctx.fillText('천구의 북극', 0, 0);
+      ctx.restore();
+    }
+
+    // 천구의 남극 (반대편)
+    {
+      const angle = 45 * DEG2RAD;
+      const r = R_SPHERE + 26;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(-45 * DEG2RAD);
+      ctx.fillText('천구의 남극', 0, 0);
+      ctx.restore();
+    }
+
+    // 북점 / 남점
+    ctx.fillText('북점', cx - R_SPHERE - 26, cy);
+    ctx.fillText('남점', cx + R_SPHERE + 26, cy);
+  }
+  else {
+    // ================= 적도 관측자 =================
+    // 천정 / 천저
+    ctx.fillText('천정', cx, cy - R_SPHERE - 18);
+    ctx.fillText('천저', cx, cy + R_SPHERE + 24);
+
+    // 천구의 북극 (왼쪽, 이미지처럼 수직 배치)
+    {
+      const x = cx - R_SPHERE - 32;
+      const y = cy;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText('천구의 북극', 0, 0);
+      ctx.restore();
+    }
+
+    // 천구의 남극 (오른쪽, 이미지처럼 수직 배치)
+    {
+      const x = cx + R_SPHERE + 32;
+      const y = cy;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText('천구의 남극', 0, 0);
+      ctx.restore();
+    }
+
+    // 천구의 적도: 노란색 경계와 연결선
+    ctx.save();
+    ctx.strokeStyle = '#000';
+    ctx.fillStyle = '#000';
+    ctx.font = '13px 맑은 고딕';
+    ctx.textAlign = 'left';
+
+    // 파란 자전축이 노란 타원과 만나는 지점(근사)
+    const eqX = cx;
+    const eqY = cy + R_SPHERE * 0.32;
+
+    // 연결선
+    ctx.beginPath();
+    ctx.moveTo(eqX, eqY);
+    ctx.lineTo(eqX + 45, eqY + 8);
+    ctx.stroke();
+
+    // 텍스트(지구에 가리지 않도록 오른쪽으로 이동)
+    ctx.fillText('천구의 적도', eqX + 50, eqY + 12);
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function drawStarsMain() {
+  ctx.save();
+  for (const s of stars) {
+    const Hh = s.H0 + globalAngle;
+    const { h, A } = altAzFromDecH(s.dec, Hh, obsLatRad);
+    if (showHorizon && h < 0) continue;
+
+    const p = projectAltAzToScreen(h, A);
+    ctx.fillStyle = p.behind ? 'rgba(200,200,255,0.20)' : s.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, s.size, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function redraw() {
+  drawBackground();
+  drawSkyDome();
+  drawDecCircles();
+  drawHorizonPlane();
+  drawEarth();
+  drawObserver();
+  if (showHorizon) drawHorizonLabels();
+  drawStarsMain();
+}
+
+/* ===================== 카메라 시점(중위도 전용) ===================== */
+function updateCamVisibility() {
+  camWrapper.style.display = (currentObserver === 'mid') ? 'block' : 'none';
+}
+
+function drawCameraView() {
+  if (currentObserver !== 'mid') {
+    camCtx.clearRect(0, 0, camCanvas.width, camCanvas.height);
+    return;
+  }
+
+  const CW  = camCanvas.width;
+  const CH  = camCanvas.height;
+  const cxc = CW / 2;
+  const cyc = CH / 2;
+
+  camCtx.fillStyle = '#000';
+  camCtx.fillRect(0, 0, CW, CH);
+
+  // 하단 라벨
+  camCtx.fillStyle = '#fff';
+  camCtx.font      = '13px 맑은 고딕';
+  camCtx.textAlign = 'center';
+  if (viewDirSel.value === 'east') {
+    camCtx.fillText('북', 40, CH - 10);
+    camCtx.fillText('동', cxc, CH - 10);
+    camCtx.fillText('남', CW - 40, CH - 10);
+  } else if (viewDirSel.value === 'west') {
+    camCtx.fillText('남', 40, CH - 10);
+    camCtx.fillText('서', cxc, CH - 10);
+    camCtx.fillText('북', CW - 40, CH - 10);
+  } else if (viewDirSel.value === 'south') {
+    camCtx.fillText('동', 40, CH - 10);
+    camCtx.fillText('남', cxc, CH - 10);
+    camCtx.fillText('서', CW - 40, CH - 10);
+  } else {
+    camCtx.fillText('서', 40, CH - 10);
+    camCtx.fillText('북', cxc, CH - 10);
+    camCtx.fillText('동', CW - 40, CH - 10);
+  }
+
+  // 타이틀
+  camCtx.font = '14px 맑은 고딕';
+  camCtx.fillText('카메라 시점', cxc, 18);
+  camCtx.font = '11px 맑은 고딕';
+  camCtx.fillText('별의 일주운동 궤적', cxc, 34);
+
+  // 짧은 시간 차(궤적 방향)
+  let dt = 0.12;
+  if (viewDirSel.value === 'east')  dt = -0.12;
+  if (viewDirSel.value === 'west')  dt =  0.12;
+  if (viewDirSel.value === 'south') dt =  0.12;
+  if (viewDirSel.value === 'north') dt = -0.12;
+
+  const SCALE_X = 1.5; // deg → px
+  const SCALE_Y = 1.5;
+  const FOV     = 75 * DEG2RAD;
+
+  for (const s of stars) {
+    // 카메라는 중위도 하늘 기반
+    const H1 = s.H0 + globalAngle;
+    const H2 = H1 + dt;
+
+    const r1 = altAzFromDecH(s.dec, H1, obsLatRad);
+    const r2 = altAzFromDecH(s.dec, H2, obsLatRad);
+
+    let dA1 = r1.A - camAzCenter;
+    dA1 = Math.atan2(Math.sin(dA1), Math.cos(dA1));
+    let dA2 = r2.A - camAzCenter;
+    dA2 = Math.atan2(Math.sin(dA2), Math.cos(dA2));
+
+    if (Math.abs(dA1) > FOV || Math.abs(dA2) > FOV) continue;
+
+    let x1 = cxc + (dA1 * 180 / Math.PI) * SCALE_X;
+    let x2 = cxc + (dA2 * 180 / Math.PI) * SCALE_X;
+    let y1 = cyc - (r1.h * 180 / Math.PI) * SCALE_Y;
+    let y2 = cyc - (r2.h * 180 / Math.PI) * SCALE_Y;
+
+    if (viewDirSel.value === 'east') {
+      x1 = cxc - (dA1 * 180 / Math.PI) * SCALE_X;
+      x2 = cxc - (dA2 * 180 / Math.PI) * SCALE_X;
+      y1 = cyc + (r1.h * 180 / Math.PI) * SCALE_Y;
+      y2 = cyc + (r2.h * 180 / Math.PI) * SCALE_Y;
+    } else if (viewDirSel.value === 'west') {
+      x1 = cxc - (dA1 * 180 / Math.PI) * SCALE_X;
+      x2 = cxc - (dA2 * 180 / Math.PI) * SCALE_X;
+      y1 = cyc + (r1.h * 180 / Math.PI) * SCALE_Y;
+      y2 = cyc + (r2.h * 180 / Math.PI) * SCALE_Y;
+    } else if (viewDirSel.value === 'south') {
+      x1 = cxc - (dA1 * 180 / Math.PI) * SCALE_X;
+      x2 = cxc - (dA2 * 180 / Math.PI) * SCALE_X;
+      const minH = Math.min(r1.h, r2.h);
+      if (minH < 15 * DEG2RAD) continue;
+    } else {
+      // 북쪽: 좌우 반전으로 반시계 감각 강화
+      x1 = cxc - (dA1 * 180 / Math.PI) * SCALE_X;
+      x2 = cxc - (dA2 * 180 / Math.PI) * SCALE_X;
+    }
+
+    camCtx.strokeStyle = 'rgba(255,255,255,0.65)';
+    camCtx.lineWidth   = 1;
+    camCtx.beginPath();
+    camCtx.moveTo(x1, y1);
+    camCtx.lineTo(x2, y2);
+    camCtx.stroke();
+
+    camCtx.fillStyle = s.color;
+    camCtx.beginPath();
+    camCtx.arc(x1, y1, s.size, 0, 2 * Math.PI);
+    camCtx.fill();
+  }
+}
+
+/* ===================== 이벤트 ===================== */
+viewDirSel.addEventListener('change', () => {
+  const v = viewDirSel.value;
+  if (v === 'east')  camAzCenter =  90 * DEG2RAD;
+  if (v === 'west')  camAzCenter = 270 * DEG2RAD;
+  if (v === 'south') camAzCenter = 180 * DEG2RAD;
+  if (v === 'north') camAzCenter =   0 * DEG2RAD;
+});
+
+toggleH.addEventListener('change', (e) => {
+  showHorizon = e.target.checked;
+});
+
+for (const r of Array.from(document.querySelectorAll("input[name='observer']"))) {
+  r.addEventListener('change', () => {
+    currentObserver = r.value;
+    setObserver();
+    updateCamVisibility();
+  });
+}
+
+/* ===================== 애니메이션 ===================== */
+function tick() {
+  globalAngle -= SPEED;
+  redraw();
+  drawCameraView();
+  requestAnimationFrame(tick);
+}
+
+/* ===================== 테스트 ===================== */
+(function runSelfTests(){
+  console.assert(typeof altAzFromDecH === 'function', 'altAzFromDecH missing');
+  console.assert(typeof projectAltAzToScreen === 'function', 'projectAltAzToScreen missing');
+  console.assert(typeof redraw === 'function', 'redraw missing');
+  console.assert(typeof drawCameraView === 'function', 'drawCameraView missing');
+  console.assert(viewDirSel && viewDirSel.tagName === 'SELECT', 'viewDirSel not wired');
+
+  const t = altAzFromDecH(0, 0, 45*DEG2RAD);
+  console.assert(Number.isFinite(t.h) && Number.isFinite(t.A), 'altAzFromDecH invalid');
+})();
+
+/* ===================== 시작 ===================== */
+initStars();
+setObserver();
+updateCamVisibility();
+tick();
+</script>
+</body>
+</html>
+
+</body>
+</html>
